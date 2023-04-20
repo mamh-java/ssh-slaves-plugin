@@ -30,11 +30,9 @@ import com.cloudbees.plugins.credentials.common.StandardUsernameCredentials;
 import com.cloudbees.plugins.credentials.domains.HostnamePortRequirement;
 import com.cloudbees.plugins.credentials.domains.SchemeRequirement;
 import com.cloudbees.plugins.credentials.common.StandardUsernameListBoxModel;
-import com.google.common.io.ByteStreams;
 import com.trilead.ssh2.ChannelCondition;
 import com.trilead.ssh2.Connection;
 import com.trilead.ssh2.SCPClient;
-import com.trilead.ssh2.SFTPv3Client;
 import com.trilead.ssh2.SFTPv3FileAttributes;
 import com.trilead.ssh2.ServerHostKeyVerifier;
 import com.trilead.ssh2.Session;
@@ -101,11 +99,11 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import static hudson.Util.fixEmpty;
+import static java.util.logging.Level.WARNING;
 
 /**
  * A computer launcher that tries to start a linux agent by opening an SSH connection and trying to find java.
@@ -260,7 +258,8 @@ public class SSHLauncher extends ComputerLauncher {
      */
     public SSHLauncher(@NonNull String host, int port, String credentialsId,
              String jvmOptions, String javaPath, String prefixStartSlaveCmd, String suffixStartSlaveCmd,
-             Integer launchTimeoutSeconds, Integer maxNumRetries, Integer retryWaitTime, SshHostKeyVerificationStrategy sshHostKeyVerificationStrategy) {
+             Integer launchTimeoutSeconds, Integer maxNumRetries, Integer retryWaitTime,
+             @CheckForNull SshHostKeyVerificationStrategy sshHostKeyVerificationStrategy) {
         setHost(host);
         setJvmOptions(jvmOptions);
         setPort(port);
@@ -420,59 +419,58 @@ public class SSHLauncher extends ComputerLauncher {
             launcherExecutorService = Executors.newSingleThreadExecutor(
                     new NamingThreadFactory(Executors.defaultThreadFactory(), "SSHLauncher.launch for '" + computer.getName() + "' node"));
             Set<Callable<Boolean>> callables = new HashSet<>();
-            callables.add(new Callable<Boolean>() {
-                public Boolean call() throws InterruptedException {
-                    Boolean rval = Boolean.FALSE;
-                    try {
-                        String[] preferredKeyAlgorithms = getSshHostKeyVerificationStrategyDefaulted().getPreferredKeyAlgorithms(computer);
-                        if (preferredKeyAlgorithms != null && preferredKeyAlgorithms.length > 0) { // JENKINS-44832
-                            connection.setServerHostKeyAlgorithms(preferredKeyAlgorithms);
-                        } else {
-                            listener.getLogger().println("Warning: no key algorithms provided; JENKINS-42959 disabled");
-                        }
-
-                        listener.getLogger().println(logConfiguration());
-
-                        openConnection(listener, computer);
-
-                        verifyNoHeaderJunk(listener);
-                        reportEnvironment(listener);
-
-                        final String workingDirectory = getWorkingDirectory(computer);
-                        if (workingDirectory == null) {
-                            listener.error("Cannot get the working directory for " + computer);
-                            return Boolean.FALSE;
-                        }
-
-                        String java = null;
-                        if (StringUtils.isNotBlank(javaPath)) {
-                            java = expandExpression(computer, javaPath);
-                        } else {
-                          //FIXME deprecated on 2020-12-10, it will removed after 2021-09-01
-                            JavaVersionChecker javaVersionChecker = new JavaVersionChecker(computer, listener, getJvmOptions(),
-                                    connection);
-                            java = javaVersionChecker.resolveJava();
-                        }
-
-                        copyAgentJar(listener, workingDirectory);
-
-                        startAgent(computer, listener, java, workingDirectory);
-
-                        PluginImpl.register(connection);
-                        rval = Boolean.TRUE;
-                    } catch (RuntimeException|Error e) {
-                        String msg = Messages.SSHLauncher_UnexpectedError();
-                        if(StringUtils.isNotBlank(e.getMessage())){
-                            msg = e.getMessage();
-                        }
-                        e.printStackTrace(listener.error(msg));
-                    } catch (AbortException e) {
-                        listener.getLogger().println(e.getMessage());
-                    } catch (IOException e) {
-                        e.printStackTrace(listener.getLogger());
-                    } finally {
-                        return rval;
+            callables.add(() -> {
+                Boolean rval = Boolean.FALSE;
+                try {
+                    String[] preferredKeyAlgorithms = getSshHostKeyVerificationStrategyDefaulted().getPreferredKeyAlgorithms(computer);
+                    if (preferredKeyAlgorithms != null && preferredKeyAlgorithms.length > 0) { // JENKINS-44832
+                        connection.setServerHostKeyAlgorithms(preferredKeyAlgorithms);
+                    } else {
+                        listener.getLogger().println("Warning: no key algorithms provided; JENKINS-42959 disabled");
                     }
+
+                    listener.getLogger().println(logConfiguration());
+
+                    openConnection(listener, computer);
+
+                    verifyNoHeaderJunk(listener);
+                    reportEnvironment(listener);
+
+                    final String workingDirectory = getWorkingDirectory(computer);
+                    if (workingDirectory == null) {
+                        listener.error("Cannot get the working directory for " + computer);
+                        return Boolean.FALSE;
+                    }
+
+                    String java = null;
+                    if (StringUtils.isNotBlank(javaPath)) {
+                        java = expandExpression(computer, javaPath);
+                    } else {
+                      checkJavaIsInPath(listener);
+                      //FIXME deprecated on 2020-12-10, it will removed after 2021-09-01
+                        JavaVersionChecker javaVersionChecker = new JavaVersionChecker(computer, listener, getJvmOptions(),
+                                connection);
+                        java = javaVersionChecker.resolveJava();
+                    }
+
+                    copyAgentJar(listener, workingDirectory);
+
+                    startAgent(computer, listener, java, workingDirectory);
+
+                    PluginImpl.register(connection);
+                    rval = Boolean.TRUE;
+                } catch (RuntimeException|Error e) {
+                    String msg = Messages.SSHLauncher_UnexpectedError();
+                    if(StringUtils.isNotBlank(e.getMessage())){
+                        msg = e.getMessage();
+                    }
+                    e.printStackTrace(listener.error(msg));
+                } catch (AbortException e) {
+                    listener.getLogger().println(e.getMessage());
+                } catch (IOException e) {
+                    e.printStackTrace(listener.getLogger());
+                } finally {
+                    return rval;
                 }
             });
 
@@ -507,11 +505,7 @@ public class SSHLauncher extends ComputerLauncher {
                 System.out.println(Messages.SSHLauncher_LaunchFailed(getTimestamp(),
                         nodeName, host));
             } finally {
-                ExecutorService srv = launcherExecutorService;
-                if (srv != null) {
-                    srv.shutdownNow();
-                    launcherExecutorService = null;
-                }
+              shutdownAndAwaitTerminationOfLauncher();
             }
         }
         if (node != null && getTrackCredentials()) {
@@ -519,7 +513,29 @@ public class SSHLauncher extends ComputerLauncher {
         }
     }
 
-    /**
+  /**
+   * try to run the Java command in the PATH ad report its version.
+   * @param listener lister to print the output of the java command.
+   */
+  private void checkJavaIsInPath(TaskListener listener) {
+    String msg = "Java is not in the PATH nor configured with the javaPath setting,"
+                 + " Jenkins will try to guess where is Java, "
+                 + "this guess will be removed in the future. :"
+                 + getDescriptor().getDisplayName();
+    int ret = 0;
+    try {
+      listener.getLogger().println("Checking Java version in the PATH");
+      ret = connection.exec("java -version", listener.getLogger());
+    } catch (Exception e){
+      ret = -1;
+    }
+    if(ret != 0){
+      LOGGER.log(WARNING, msg);
+      listener.getLogger().println(msg);
+    }
+  }
+
+  /**
      * Called to terminate the SSH connection. Used liberally when we back out from an error.
      */
     private void cleanupConnection(TaskListener listener) {
@@ -639,7 +655,7 @@ public class SSHLauncher extends ComputerLauncher {
 
     private void expandChannelBufferSize(Session session, TaskListener listener) {
             // see hudson.remoting.Channel.PIPE_WINDOW_SIZE for the discussion of why 1MB is in the right ball park
-            // but this particular session is where all the master/agent communication will happen, so
+            // but this particular session is where all the controller/agent communication will happen, so
             // it's worth using a bigger buffer to really better utilize bandwidth even when the latency is even larger
             // (and since we are draining this pipe very rapidly, it's unlikely that we'll actually accumulate this much data)
             int sz = 4;
@@ -772,7 +788,7 @@ public class SSHLauncher extends ComputerLauncher {
 
         byte[] bytes = null;
         try{
-            bytes = ByteStreams.toByteArray(inputStream);
+            bytes = IOUtils.toByteArray(inputStream);
         }catch(IOException e){
             throw e;
         } finally {
@@ -914,12 +930,7 @@ public class SSHLauncher extends ComputerLauncher {
             // Nothing to do here, the connection is not established
             return;
         }
-
-        ExecutorService srv = launcherExecutorService;
-        if (srv != null) {
-            // If the service is still running, shut it down and interrupt the operations if any
-            srv.shutdown();
-        }
+        shutdownAndAwaitTerminationOfLauncher();
 
         if (tearingDownConnection) {
             // tear down operation is in progress, do not even try to synchronize the call.
@@ -960,6 +971,30 @@ public class SSHLauncher extends ComputerLauncher {
         } finally {
             tearingDownConnection = false;
         }
+    }
+
+    private void shutdownAndAwaitTerminationOfLauncher() {
+      ExecutorService srv = launcherExecutorService;
+      if (srv == null) {
+          return;
+      }
+      srv.shutdown(); // Disable new tasks from being submitted
+      launcherExecutorService = null;
+      try {
+          // Wait a while for existing tasks to terminate
+          if (!srv.awaitTermination(10, TimeUnit.SECONDS)) {
+              srv.shutdownNow(); // Cancel currently executing tasks
+              // Wait a while for tasks to respond to being cancelled
+              if (!srv.awaitTermination(10, TimeUnit.SECONDS)) {
+                  LOGGER.log(WARNING, "launcherExecutorService thread pool did not terminate cleanly");
+              }
+          }
+      } catch (InterruptedException ie) {
+        // (Re-)Cancel if current thread also interrupted
+        srv.shutdownNow();
+        // Preserve interrupt status
+        Thread.currentThread().interrupt();
+      }
     }
 
     /**
@@ -1009,7 +1044,7 @@ public class SSHLauncher extends ComputerLauncher {
     }
 
     @DataBoundSetter
-    public void setSshHostKeyVerificationStrategy(SshHostKeyVerificationStrategy value) {
+    public void setSshHostKeyVerificationStrategy(@CheckForNull SshHostKeyVerificationStrategy value) {
         this.sshHostKeyVerificationStrategy = value;
     }
 
@@ -1183,6 +1218,7 @@ public class SSHLauncher extends ComputerLauncher {
         /**
          * {@inheritDoc}
          */
+        @NonNull
         public String getDisplayName() {
             return Messages.SSHLauncher_DescriptorDisplayName();
         }
@@ -1324,12 +1360,12 @@ public class SSHLauncher extends ComputerLauncher {
         }
 
         @Override
-        public void write(byte[] b) throws IOException {
+        public void write(@NonNull byte[] b) throws IOException {
             if (out != null) out.write(b);
         }
 
         @Override
-        public void write(byte[] b, int off, int len) throws IOException {
+        public void write(@NonNull byte[] b, int off, int len) throws IOException {
             if (out != null) out.write(b, off, len);
         }
     }
