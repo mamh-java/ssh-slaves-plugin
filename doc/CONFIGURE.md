@@ -14,7 +14,7 @@ This means that **you have to install a JDK/JRE 8 on your agent** in order to ru
 
 The agent should have **enough memory** to run the remoting process and the builds. 
 
-**The agent needs to be reachable from the master**,
+**The agent needs to be reachable from the Jenkins controller**,
 You have to be ensure that your Jenkins instance can connect through SSH port to your agent; you can check it from the command line.
 You will have to supply an account that can log in on the target machine. No root privileges are required.
 
@@ -106,7 +106,7 @@ to see if an entry exists that matches the current connection. It is possible to
 the Java property `-Dhudson.plugins.sshslaves.verifiers.KnownHostsFileKeyVerificationStrategy.known_hosts_file=PATH_TO_FILE`
 
 This method does not make any updates to the Known Hosts file, instead using the file as a read-only source and expecting
-someone with suitable access to the appropriate user account on the Jenkins master to update the file as required,
+someone with suitable access to the appropriate user account on the Jenkins controller to update the file as required,
 potentially using the ssh hostname command to initiate a connection and update the file appropriately.
 
 #### Manually provided key Verification Strategy
@@ -116,7 +116,7 @@ potentially using the ssh hostname command to initiate a connection and update t
 Checks the key provided by the remote host matches the key set by the user who configured this connection.
 
 The SSH key expected for this connection. This key should be in the form `algorithm value`
-where algorithm is one of ssh-rsa or ssh-dss, and value is the Base 64 encoded content of the key. The keys should be placed in /etc/ssh/<key_name>.pub
+where `algorithm` is one of ssh-rsa, ssh-ed25519, or ecdsa-sha2-nistp256, and `value` is the base 64 encoded content of the key. The public keys for a Linux agent can be read from the agent file system at `/etc/ssh/<key_name>.pub`.
 
 #### Manually trusted key Verification Strategy
 
@@ -226,13 +226,16 @@ See [SSH Build Agents and Cygwin](https://wiki.jenkins.io/display/JENKINS/SSH+sl
 
 ### Launch Windows agents using Microsoft OpenSSH
 
-The current version of the plugin does not run directly on PowerShell, you have to use prefix and suffix settings to trick the command and make it works, Windows 10 machines can run as SSH agents with the Microsoft OpenSSH server by using:
+The current version of the plugin does not run when Powershell is the default shell for the agent system. To connect to the agent you have to use prefix and suffix settings to trick the command and make it work, Windows 10/11 machines can run as SSH agents with the Microsoft OpenSSH server by using:
 
 **Prefix Start Agent Command**
 
 ```
 powershell -Command "cd C:\J\S ; C:\J\S\jdk\bin\java.exe -jar remoting.jar" ; exit 0 ; rem '
 ```
+
+`C:\J\S` is the path to the agent work directory on the agent system. If java is in a different directory, you will need to specify that directory instead of `C:\J\S\jdk\bin`.
+
 **Suffix Start Agent Command**
 
 ```
